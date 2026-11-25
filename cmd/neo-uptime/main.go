@@ -157,6 +157,12 @@ func serve(host string, port int, dataDir, certFile, keyFile string) {
 	}
 	app := api.New(db, mgr, bp, agents, hub, web.FS(), dataDir)
 	app.SetPanelPort(port)
+	closeConfigRoutes, err := app.StartConfigRoutes(ctx)
+	if err != nil {
+		log.Printf("Config Routes unavailable: %v", err)
+	} else {
+		defer closeConfigRoutes()
+	}
 	app.StartAds(ctx)
 	app.StartRadar(ctx)
 	addr := net.JoinHostPort(host, strconv.Itoa(port))

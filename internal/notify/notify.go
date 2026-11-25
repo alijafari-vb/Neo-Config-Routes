@@ -24,6 +24,7 @@ const (
 
 // Event is one thing worth telling someone about.
 type Event struct {
+	CustomTitle string `json:"-"` // optional title for module events
 	Kind        string    `json:"kind"` // status | cert | latency | latency-ok | test
 	MonitorID   int64     `json:"monitorId"`
 	MonitorName string    `json:"monitorName"`
@@ -125,6 +126,9 @@ func (e Event) Color() int {
 
 // Title is a one-line summary.
 func (e Event) Title() string {
+	if e.CustomTitle != "" {
+		return e.CustomTitle
+	}
 	if e.fa() {
 		switch e.Kind {
 		case "test":

@@ -11,12 +11,14 @@ import { Button, Menu } from './ui'
 import { Logo } from './meta'
 import { ProjectLinks } from './brand'
 import { ChannelCard } from './AdCard'
+import { Route as RouteIcon } from 'lucide-react'
 
 const nav = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/servers', label: 'Servers', icon: Server },
   { to: '/tunnels', label: 'Tunnels', icon: Cable },
   { to: '/configs', label: 'Configs', icon: Rocket },
+  { to: '/config-routes', label: 'Config routes', icon: RouteIcon },
   { to: '/status-pages', label: 'Status pages', icon: Rss },
   { to: '/maintenance', label: 'Maintenance', icon: Wrench },
   { to: '/settings', label: 'Settings', icon: Settings },
@@ -138,7 +140,7 @@ export default function Shell() {
         </div>
       )}
       <nav className="px-3 space-y-0.5" aria-label={t('Main')}>
-        {nav.map((item) => (
+        {nav.filter((item) => item.to !== '/config-routes' || role === 'admin').map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -150,7 +152,7 @@ export default function Shell() {
             }
           >
             <item.icon className="size-[18px]" />
-            <span className="flex-1">{t(item.label)}</span>
+            <span className="flex-1">{item.to === '/config-routes' && useLang.getState().lang === 'fa' ? 'مسیرهای کانفیگ' : t(item.label)}</span>
             {item.to === '/servers' && offlineAgents > 0 && (
               <span className="min-w-5 h-5 px-1.5 rounded-full bg-down text-white text-[11px] font-bold grid place-items-center">{n(offlineAgents)}</span>
             )}
