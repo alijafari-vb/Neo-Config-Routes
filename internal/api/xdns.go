@@ -18,7 +18,7 @@ import (
 // StartConfigRoutes attaches the module before the panel begins serving.
 func (s *Server) StartConfigRoutes(ctx context.Context) (func(), error) {
 	module, err := xdns.Open(filepath.Join(s.dataDir, "xdns"), xdns.Sources{
-		Snapshot: s.routeSnapshot, Validate: s.validateRoute, Notify: s.routeNotification,
+		Snapshot: s.routeSnapshot, Validate: s.validateRoute, Notify: s.routeNotification, Ping: s.routePing,
 	})
 	if err != nil {
 		unavailable := s.admin(func(w http.ResponseWriter, r *http.Request) {
@@ -148,4 +148,21 @@ func (s *Server) routeNotification(ctx context.Context, id int64, e xdns.Event) 
 		Target: e.Record, Time: time.UnixMilli(e.At), Status: status, Msg: message, Lang: lang, TZ: tz, Link: link,
 		SiteTitle: s.db.GetSetting(ctx, "siteTitle", "Neo Uptime"),
 	})
+}
+
+func (s *Server) routePing(ctx context.Context, ids []int64, start time.Time) (map[int64][]xdns.PingBucket, error) {
+	slots, err := s.db.Buckets(ctx, ids, false, start)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[int64][]xdns.PingBucket, len(slots))
+	for id, buckets := range slots {
+		for _, b := range buckets {
+			if b.TS > time.Now().Unix() {
+				break
+			}
+			result[id] = append(result[id], xdns.PingBucket{At: b.TS * 1000, Avg: b.AvgPing, Min: b.MinPing, Max: b.MaxPing})
+		}
+	}
+	return result, nil
 }

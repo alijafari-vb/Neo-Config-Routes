@@ -3,10 +3,12 @@ package xdns
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -62,7 +64,28 @@ func (c *Cloudflare) call(ctx context.Context, token, method, path string, paylo
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return errors.New("Cloudflare request failed or timed out")
+		action := "lookup"
+		if method == http.MethodPatch {
+			action = "update"
+		}
+		var dnsErr *net.DNSError
+		var netErr net.Error
+		var certErr *tls.CertificateVerificationError
+		var opErr *net.OpError
+		switch {
+		case errors.Is(err, context.Canceled):
+			return context.Canceled
+		case errors.As(err, &dnsErr):
+			return fmt.Errorf("Cloudflare %s: DNS resolution failed", action)
+		case errors.As(err, &netErr) && netErr.Timeout():
+			return fmt.Errorf("Cloudflare %s: connection or response timed out", action)
+		case errors.As(err, &certErr):
+			return fmt.Errorf("Cloudflare %s: TLS certificate verification failed", action)
+		case errors.As(err, &opErr) && opErr.Op == "dial":
+			return fmt.Errorf("Cloudflare %s: connection failed", action)
+		default:
+			return fmt.Errorf("Cloudflare %s: network request failed", action)
+		}
 	}
 	defer resp.Body.Close()
 	var result struct {

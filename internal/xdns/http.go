@@ -49,6 +49,7 @@ func (s *Service) Mount(mux *http.ServeMux, admin func(http.HandlerFunc) http.Ha
 	mux.HandleFunc("PUT /api/xdns/groups/{id}", admin(s.save))
 	mux.HandleFunc("DELETE /api/xdns/groups/{id}", admin(s.delete))
 	mux.HandleFunc("GET /api/xdns/groups/{id}/history", admin(s.history))
+	mux.HandleFunc("GET /api/xdns/groups/{id}/insights", admin(s.insights))
 	mux.HandleFunc("POST /api/xdns/evaluate", admin(func(w http.ResponseWriter, r *http.Request) {
 		s.Wake()
 		reply(w, 202, map[string]bool{"queued": true})

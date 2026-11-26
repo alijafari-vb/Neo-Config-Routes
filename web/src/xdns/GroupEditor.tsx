@@ -152,8 +152,13 @@ export default function GroupEditor({ initial, onClose, onSaved }: {
               </fieldset>
               <fieldset className="space-y-2">
                 <legend className="mb-2 text-xs font-semibold text-muted">{t('Events', 'رویدادها')}</legend>
-                {eventKinds.map((kind) => <Checkbox className="flex" key={kind} checked={group.events.includes(kind)} label={eventLabel(t, kind)}
+                {eventKinds.filter((kind) => kind !== 'error').map((kind) => <Checkbox className="flex" key={kind} checked={group.events.includes(kind)} label={eventLabel(t, kind)}
                   onChange={(v) => set('events', v ? [...group.events, kind] : group.events.filter((k) => k !== kind))} />)}
+                <div className="mt-3 rounded-lg border border-down/25 bg-down/5 p-2.5">
+                  <Checkbox checked={group.events.includes('error')} label={t('Cloudflare error alert', 'اعلان خطای کلادفلر')}
+                    onChange={(enabled) => set('events', enabled ? [...group.events, 'error'] : group.events.filter((kind) => kind !== 'error'))} />
+                  <p className="mt-1 text-xs text-muted">{t('Send to the selected active channels after a lookup or update error in live mode.', 'در حالت واقعی، خطای خواندن یا تغییر رکورد به کانال‌های فعال انتخاب‌شده ارسال می‌شود.')}</p>
+                </div>
               </fieldset>
             </div>
           )}

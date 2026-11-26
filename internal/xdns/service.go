@@ -15,19 +15,22 @@ const cadence = 15 * time.Second
 
 type Sources struct {
 	Snapshot func(context.Context, []int64) (map[int64]Monitor, error)
+	Ping     func(context.Context, []int64, time.Time) (map[int64][]PingBucket, error)
 	Validate func(context.Context, Group) error
 	Notify   func(context.Context, int64, Event) error
 }
 
 type View struct {
 	Group
-	Health         []Health `json:"health"`
-	Current        string   `json:"current"`
-	Simulated      string   `json:"simulated"`
-	LastError      string   `json:"lastError"`
-	LastEvaluation int64    `json:"lastEvaluation"`
-	LastSwitch     int64    `json:"lastSwitch"`
-	Reason         string   `json:"reason"`
+	Health         []Health    `json:"health"`
+	Current        string      `json:"current"`
+	Simulated      string      `json:"simulated"`
+	LastError      string      `json:"lastError"`
+	Cloud          CloudHealth `json:"cloud"`
+	ErrorAlerts    bool        `json:"errorAlerts"`
+	LastEvaluation int64       `json:"lastEvaluation"`
+	LastSwitch     int64       `json:"lastSwitch"`
+	Reason         string      `json:"reason"`
 }
 
 type runtime struct {
@@ -152,8 +155,14 @@ func (s *Service) process(ctx context.Context, g Group, monitors map[int64]Monit
 	now := time.Now()
 	rt := s.state[g.ID]
 	if rt == nil || rt.Revision != g.Revision {
-		rt = &runtime{View: View{Group: g, Health: []Health{}}}
+		rt = &runtime{View: View{Group: g, Health: []Health{}, ErrorAlerts: errorAlertsEnabled(g)}}
 		s.state[g.ID] = rt
+		rt.Cloud, err = s.repo.cloudHealth(ctx, g)
+		if err != nil {
+			delete(s.state, g.ID)
+			return err
+		}
+		rt.LastError = rt.Cloud.Message
 		rt.LastSwitch, err = s.repo.lastSwitch(ctx, g)
 		if err != nil {
 			delete(s.state, g.ID)
@@ -196,10 +205,9 @@ func (s *Service) process(ctx context.Context, g Group, monitors map[int64]Monit
 	}
 	fresh := false
 	if rt.record.ID == "" || now.Sub(rt.checked) >= time.Minute || pending.ID != 0 {
-		if err := s.refresh(ctx, rt, token); err != nil {
+		if err := s.refresh(ctx, rt, token, dry); err != nil {
 			if !g.Enabled && pending.ID == 0 {
-				s.noteError(rt, err, now)
-				return nil
+				return s.noteError(ctx, rt, err, "lookup")
 			}
 			return s.recordError(ctx, rt, err, now, dry)
 		}
@@ -213,17 +221,18 @@ func (s *Service) process(ctx context.Context, g Group, monitors map[int64]Monit
 		} else {
 			pending.Status, pending.Message = "failed", "Cloudflare did not confirm the pending change"
 		}
-		if err := s.repo.finish(ctx, pending, channelsFor(g, pending)); err != nil {
+		if err := s.repo.finishIncident(ctx, pending, channelsFor(g, pending), Failure+"-update"); err != nil {
 			return err
 		}
 		if pending.Status == "failed" {
-			rt.LastError = pending.Message
-			rt.retry = now.Add(time.Minute)
-			return nil
+			return s.noteError(ctx, rt, errors.New(pending.Message), "update")
+		}
+		if err := s.clearCloudError(ctx, rt); err != nil {
+			return err
 		}
 	}
 	if !g.Enabled {
-		rt.Reason, rt.LastError = "disabled", ""
+		rt.Reason = "disabled"
 		return nil
 	}
 	current := rt.Current
@@ -234,7 +243,7 @@ func (s *Service) process(ctx context.Context, g Group, monitors map[int64]Monit
 	decision := choose(g, current, rt.Health)
 	rt.Reason = decision.Reason
 	if decision.Target != "" && now.UnixMilli()-lastSwitch >= int64(g.CooldownSeconds)*1000 && !fresh {
-		if err := s.refresh(ctx, rt, token); err != nil {
+		if err := s.refresh(ctx, rt, token, dry); err != nil {
 			return s.recordError(ctx, rt, err, now, dry)
 		}
 		current = rt.Current
@@ -260,8 +269,7 @@ func (s *Service) process(ctx context.Context, g Group, monitors map[int64]Monit
 		}
 	}
 	if decision.Target == "" {
-		rt.LastError, rt.failures = "", 0
-		return s.repo.clearIncident(ctx, g.ID, failureIncident(dry))
+		return nil
 	}
 	if now.UnixMilli()-lastSwitch < int64(g.CooldownSeconds)*1000 {
 		rt.Reason = "cooldown"
@@ -272,8 +280,8 @@ func (s *Service) process(ctx context.Context, g Group, monitors map[int64]Monit
 		if _, err := s.repo.addEvent(ctx, g, event, "", nil); err != nil {
 			return err
 		}
-		rt.Simulated, rt.drySwitch, rt.LastError, rt.failures = decision.Target, now.UnixMilli(), "", 0
-		return s.repo.clearIncident(ctx, g.ID, failureIncident(dry))
+		rt.Simulated, rt.drySwitch = decision.Target, now.UnixMilli()
+		return nil
 	}
 	if decision.Target == rt.record.Content {
 		return nil
@@ -286,7 +294,9 @@ func (s *Service) process(ctx context.Context, g Group, monitors map[int64]Monit
 	}
 	record, err := s.dns.Update(ctx, token, g, rt.record, decision.Target)
 	if err != nil {
-		s.noteError(rt, err, now)
+		if noteErr := s.noteError(ctx, rt, err, "update"); noteErr != nil {
+			return noteErr
+		}
 		event.At = time.Now().UnixMilli()
 		event.Message = err.Error()
 		// A timeout, 5xx or invalid response can follow a successful write.
@@ -294,22 +304,26 @@ func (s *Service) process(ctx context.Context, g Group, monitors map[int64]Monit
 		var apiErr *cloudError
 		if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 && apiErr.Status != 408 {
 			event.Status = "failed"
-			return s.repo.finish(ctx, event, channelsFor(g, event))
+			return s.repo.finishIncident(ctx, event, channelsFor(g, event), Failure+"-update")
 		}
 		event.Status = "uncertain"
-		_, storeErr := s.repo.addEvent(ctx, g, event, Failure, channelsFor(g, event))
+		_, storeErr := s.repo.addEvent(ctx, g, event, Failure+"-update", channelsFor(g, event))
 		return storeErr
 	}
 	event.At, event.Status, event.Message = time.Now().UnixMilli(), "changed", "Cloudflare confirmed the DNS change"
 	if err := s.repo.finish(ctx, event, channelsFor(g, event)); err != nil {
 		return err
 	}
-	rt.record, rt.Current, rt.LastSwitch, rt.LastError = record, record.Content, event.At, ""
-	rt.checked, rt.failures = time.Now(), 0
-	return s.repo.clearIncident(ctx, g.ID, Failure)
+	rt.record, rt.Current, rt.LastSwitch = record, record.Content, event.At
+	rt.checked = time.UnixMilli(event.At)
+	rt.Cloud.VerifiedAt = event.At
+	if err := s.repo.observeRoute(ctx, g, rt.checked, record.Content); err != nil {
+		return err
+	}
+	return s.clearCloudError(ctx, rt)
 }
 
-func (s *Service) refresh(ctx context.Context, rt *runtime, token string) error {
+func (s *Service) refresh(ctx context.Context, rt *runtime, token string, dry bool) error {
 	record, err := s.dns.Lookup(ctx, token, rt.Group)
 	if err != nil {
 		return err
@@ -318,22 +332,60 @@ func (s *Service) refresh(ctx context.Context, rt *runtime, token string) error 
 		rt.Simulated, rt.drySwitch = "", 0
 	}
 	rt.record, rt.Current, rt.checked = record, record.Content, time.Now()
+	rt.Cloud.VerifiedAt = rt.checked.UnixMilli()
+	if err := s.repo.observeRoute(ctx, rt.Group, rt.checked, record.Content); err != nil {
+		return err
+	}
+	if err := s.repo.clearIncident(ctx, rt.ID, failureIncident(dry)); err != nil {
+		return err
+	}
+	if rt.Cloud.Operation != "update" {
+		return s.clearCloudError(ctx, rt)
+	}
+	return s.repo.setCloudHealth(ctx, rt.Group, rt.Cloud)
+}
+
+func (s *Service) clearCloudError(ctx context.Context, rt *runtime) error {
+	operation := rt.Cloud.Operation
+	rt.LastError, rt.failures = "", 0
+	rt.retry = time.Time{}
+	rt.Cloud = CloudHealth{VerifiedAt: rt.Cloud.VerifiedAt}
+	if err := s.repo.setCloudHealth(ctx, rt.Group, rt.Cloud); err != nil {
+		return err
+	}
+	if operation == "update" {
+		return s.repo.clearIncident(ctx, rt.ID, Failure+"-update")
+	}
 	return nil
 }
 
-func (s *Service) noteError(rt *runtime, err error, now time.Time) {
+func (s *Service) noteError(ctx context.Context, rt *runtime, err error, op string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	now := time.Now()
 	rt.LastError = err.Error()
 	rt.failures = min(rt.failures+1, 6)
 	rt.retry = now.Add(15 * time.Second << rt.failures)
 	var apiErr *cloudError
 	if errors.As(err, &apiErr) && apiErr.Retry > 0 {
 		s.backoff = now.Add(apiErr.Retry)
+		if rt.retry.Before(s.backoff) {
+			rt.retry = s.backoff
+		}
 	}
+	rt.Cloud.Operation, rt.Cloud.Message, rt.Cloud.FailedAt, rt.Cloud.RetryAt = op, rt.LastError, now.UnixMilli(), rt.retry.UnixMilli()
+	if err := s.repo.setCloudHealth(ctx, rt.Group, rt.Cloud); err != nil {
+		return err
+	}
+	return s.repo.observeRoute(ctx, rt.Group, now, "")
 }
 
 func (s *Service) recordError(ctx context.Context, rt *runtime, err error, now time.Time, dry bool) error {
-	s.noteError(rt, err, now)
-	e := eventFor(rt, Decision{Reason: Failure}, rt.Current, "failed", err.Error(), now)
+	if err := s.noteError(ctx, rt, err, "lookup"); err != nil {
+		return err
+	}
+	e := eventFor(rt, Decision{Reason: Failure}, rt.Current, "failed", rt.LastError, now)
 	_, err = s.repo.addEvent(ctx, rt.Group, e, failureIncident(dry), alertChannels(rt.Group, e, dry))
 	return err
 }

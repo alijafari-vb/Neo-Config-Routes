@@ -95,6 +95,15 @@ func openRepository(dir string) (*repository, error) {
 		CREATE TABLE IF NOT EXISTS xdns_incidents (
 			group_id INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL, PRIMARY KEY(group_id,kind)
 		);
+		CREATE TABLE IF NOT EXISTS xdns_cloud_health (
+			group_id INTEGER NOT NULL, record_key TEXT NOT NULL, operation TEXT NOT NULL, message TEXT NOT NULL,
+			failed_at INTEGER NOT NULL, retry_at INTEGER NOT NULL, verified_at INTEGER NOT NULL,
+			PRIMARY KEY(group_id, record_key)
+		);
+		CREATE TABLE IF NOT EXISTS xdns_route_samples (
+			group_id INTEGER NOT NULL, record_key TEXT NOT NULL, at INTEGER NOT NULL, target TEXT NOT NULL,
+			PRIMARY KEY(group_id, record_key, at)
+		) WITHOUT ROWID;
 		CREATE TABLE IF NOT EXISTS xdns_delivery (
 			event_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
 			next INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
@@ -313,6 +322,10 @@ func enqueue(ctx context.Context, tx *sql.Tx, event int64, channels []int64) err
 }
 
 func (s *repository) finish(ctx context.Context, e Event, channels []int64) error {
+	return s.finishIncident(ctx, e, channels, "")
+}
+
+func (s *repository) finishIncident(ctx context.Context, e Event, channels []int64, incident string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -328,6 +341,15 @@ func (s *repository) finish(ctx context.Context, e Event, channels []int64) erro
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return errors.New("switch journal entry is no longer pending")
+	}
+	if incident != "" && e.Status == "failed" {
+		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO xdns_incidents VALUES(?,?,?)`, e.GroupID, incident, e.Message)
+		if err != nil {
+			return err
+		}
+		if n, _ := result.RowsAffected(); n == 0 {
+			channels = nil
+		}
 	}
 	if err := enqueue(ctx, tx, e.ID, channels); err != nil {
 		return err
@@ -379,7 +401,7 @@ func (s *repository) remove(ctx context.Context, id, revision int64) error {
 	if n, _ := res.RowsAffected(); n != 1 {
 		return errConflict
 	}
-	for _, table := range []string{"xdns_incidents", "xdns_history"} {
+	for _, table := range []string{"xdns_incidents", "xdns_history", "xdns_cloud_health", "xdns_route_samples"} {
 		if table == "xdns_history" {
 			if _, err := tx.ExecContext(ctx, "DELETE FROM xdns_delivery WHERE event_id IN (SELECT id FROM xdns_history WHERE group_id=?)", id); err != nil {
 				return err

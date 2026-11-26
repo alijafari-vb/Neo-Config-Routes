@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Navigate } from 'react-router-dom'
-import { Activity, Cloud, History, Pencil, Plus, Route, Trash2 } from 'lucide-react'
+import { Activity, BellOff, ChartNoAxesColumn, Cloud, History, Pencil, Plus, Route, Trash2, TriangleAlert } from 'lucide-react'
 import { Badge, Button, Checkbox, Field, Input, Modal, Spinner, confirm, toast } from '../components/ui'
 import { api } from '../lib/api'
 import { fmtDate, fmtTimeSec } from '../lib/format'
 import { useApp } from '../lib/store'
 import GroupEditor from './GroupEditor'
+import RouteInsights from './RouteInsights'
 import { errorText, eventLabel, groupFrom, recordName, useLocalize, type Group, type HistoryEvent, type Index, type Preferences, type View } from './types'
 
 const base = '/api/xdns'
@@ -126,7 +127,10 @@ function SwitchHistory({ group, onClose }: { group: Group; onClose: () => void }
   )
 }
 
-function RouteCard({ view, edit, history, remove }: { view: View; edit: () => void; history: () => void; remove: () => void }) {
+function RouteCard({ view, edit, history, remove, dryRun }: { view: View; edit: () => void; history: () => void; remove: () => void; dryRun: boolean }) {
+  const [insights, setInsights] = useState(false)
+  const notifications = useApp((s) => s.notifications)
+  const alerts = view.errorAlerts && view.channels.some((id) => notifications.some((n) => n.id === id && n.active)) && !dryRun
   const t = useLocalize()
   const monitors = useApp((s) => s.monitors)
   const health = new Map(view.health.map((h) => [h.monitorId, h]))
@@ -138,12 +142,13 @@ function RouteCard({ view, edit, history, remove }: { view: View; edit: () => vo
   } as const
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
+    <article id={`route-${view.id}`} className={`scroll-mt-4 overflow-hidden rounded-2xl border bg-surface shadow-sm ${view.lastError ? 'border-down/45' : 'border-line'}`}>
       <div className="flex flex-wrap items-start justify-between gap-4 border-b border-line p-4 sm:p-5">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="break-words text-lg font-semibold">{view.name}</h2>
             <Badge tone={view.enabled ? 'up' : 'neutral'}>{view.enabled ? t('Enabled', 'فعال') : t('Disabled', 'غیرفعال')}</Badge>
+            {view.lastError && <Badge tone="down"><TriangleAlert className="me-1 size-3" aria-hidden />{t('Cloudflare issue', 'خطای کلادفلر')}</Badge>}
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm text-muted">
             <Badge tone="outline" mono>{view.kind}</Badge>
@@ -152,6 +157,7 @@ function RouteCard({ view, edit, history, remove }: { view: View; edit: () => vo
         </div>
         <div className="flex flex-wrap gap-1.5">
           <Button size="sm" onClick={edit} icon={<Pencil className="size-3.5" />}>{t('Edit', 'ویرایش')}</Button>
+          <Button size="sm" aria-expanded={insights} onClick={() => setInsights((on) => !on)} icon={<ChartNoAxesColumn className="size-3.5" />}>{t('Insights', 'آمار')}</Button>
           <Button size="sm" onClick={history} icon={<History className="size-3.5" />}>{t('History', 'تاریخچه')}</Button>
           <Button size="sm" variant="ghost" onClick={remove} aria-label={t('Delete group', 'حذف گروه')} icon={<Trash2 className="size-3.5" />} />
         </div>
@@ -166,7 +172,22 @@ function RouteCard({ view, edit, history, remove }: { view: View; edit: () => vo
         {view.reason && view.reason !== 'disabled' && <Badge tone="outline">{eventLabel(t, view.reason)}</Badge>}
         {!!view.lastEvaluation && <span className="ms-auto text-xs text-muted">{t('Evaluated', 'آخرین ارزیابی')} {fmtTimeSec(view.lastEvaluation)}</span>}
       </div>
-      {view.lastError && <p role="status" className="border-t border-line bg-down/8 px-4 py-2.5 text-sm leading-relaxed text-down sm:px-5">{view.lastError}</p>}
+      {view.lastError && <aside role="status" className="border-t border-down/20 bg-down/8 px-4 py-3 text-sm sm:px-5">
+        <div className="flex flex-wrap items-center gap-2 font-semibold text-down">
+          <TriangleAlert className="size-4" aria-hidden />
+          {view.cloud?.operation === 'update' ? t('DNS update failed', 'تغییر DNS ناموفق بود') : t('Cloudflare lookup failed', 'خواندن رکورد از کلادفلر ناموفق بود')}
+        </div>
+        <p className="mt-1 break-words text-sm text-fg"><bdi>{view.lastError}</bdi></p>
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+          {!!view.cloud?.failedAt && <span>{t('Last error', 'آخرین خطا')} · {fmtTimeSec(view.cloud.failedAt)}</span>}
+          {!!view.cloud?.verifiedAt && <span>{t('DNS last verified', 'آخرین تأیید DNS')} · {fmtTimeSec(view.cloud.verifiedAt)}</span>}
+          {view.cloud?.retryAt > Date.now() && <span>{t('Retry after', 'زمان تلاش بعدی')} · {fmtTimeSec(view.cloud.retryAt)}</span>}
+          {alerts && <span>{t('Error alerts enabled', 'اعلان خطا فعال است')}</span>}
+        </div>
+        {!alerts && <Button className="mt-2" size="sm" onClick={edit} icon={<BellOff className="size-3.5" />}>
+          {dryRun ? t('Alerts paused in Dry run', 'اعلان‌ها در اجرای آزمایشی متوقف‌اند') : t('Configure error alerts', 'تنظیم اعلان خطا')}
+        </Button>}
+      </aside>}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[30rem] text-start text-sm">
           <thead className="border-y border-line text-xs text-muted">
@@ -192,6 +213,7 @@ function RouteCard({ view, edit, history, remove }: { view: View; edit: () => vo
           </tbody>
         </table>
       </div>
+      {insights && <RouteInsights key={view.revision} group={view} />}
     </article>
   )
 }
@@ -251,6 +273,7 @@ function RoutesPage() {
     }
   }
 
+  const issues = index?.groups.filter((group) => group.lastError) ?? []
   return (
     <div className="mx-auto max-w-6xl space-y-5 px-4 py-5 sm:px-6 sm:py-7">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -274,6 +297,11 @@ function RoutesPage() {
         <Badge tone={index.dryRun ? 'accent' : 'up'}>{index.dryRun ? t('Dry run', 'اجرای آزمایشی') : t('Live DNS', 'تغییر واقعی DNS')}</Badge>
         <Badge tone={index.tokenConfigured ? 'outline' : 'pending'}>{index.tokenConfigured ? t('Token configured', 'توکن ثبت شده') : t('Cloudflare token required', 'توکن کلادفلر لازم است')}</Badge>
       </div>}
+      {issues.length > 0 && <div className="flex flex-wrap items-center gap-2 rounded-xl border border-down/35 bg-down/8 p-3 text-sm text-down">
+        <TriangleAlert className="size-4" aria-hidden />
+        <strong>{t('Cloudflare issues', 'خطاهای کلادفلر')}</strong>
+        {issues.map((group) => <a key={group.id} className="rounded-md bg-down/10 px-2 py-1 text-xs font-medium underline underline-offset-2" href={`#route-${group.id}`}>{group.name}</a>)}
+      </div>}
       {error && <p role="alert" className="rounded-xl bg-down/10 p-3 text-sm text-down">{error}</p>}
       {!index && !error && <Spinner />}
       {index?.groups.length === 0 && (
@@ -283,7 +311,7 @@ function RoutesPage() {
         </div>
       )}
       <div className="space-y-4">
-        {index?.groups.map((view) => <RouteCard key={view.id} view={view}
+        {index?.groups.map((view) => <RouteCard key={view.id} view={view} dryRun={index.dryRun}
           edit={() => setEditor(groupFrom(view))} history={() => setHistory(view)} remove={() => void remove(view)} />)}
       </div>
       {editor && <GroupEditor key={editor.id} initial={editor} onClose={() => setEditor(undefined)}

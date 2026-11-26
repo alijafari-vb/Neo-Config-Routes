@@ -48,6 +48,10 @@ func TestXDNSUsesNeoSessionAndMonitors(t *testing.T) {
 	id := int64(saved["id"].(float64))
 	request("POST", "/api/xdns/groups", string(payload), true, 409)
 	request("GET", fmt.Sprintf("/api/xdns/groups/%d/history", id), "", false, 200)
+	stats := request("GET", fmt.Sprintf("/api/xdns/groups/%d/insights?hours=24&tz=Asia/Tehran", id), "", false, 200)
+	if len(stats["buckets"].([]any)) != 24 || stats["changes"] != float64(0) {
+		t.Fatal("wrong empty insights overview")
+	}
 	request("POST", "/api/xdns/evaluate", "", true, 202)
 	request("DELETE", fmt.Sprintf("/api/xdns/groups/%d?revision=99", id), "", true, 409)
 	request("DELETE", fmt.Sprintf("/api/xdns/groups/%d?revision=1", id), "", true, 200)

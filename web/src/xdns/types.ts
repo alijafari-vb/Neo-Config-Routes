@@ -36,6 +36,8 @@ export type View = Group & {
   current: string
   simulated: string
   lastError: string
+  cloud: { operation: string; message: string; failedAt: number; retryAt: number; verifiedAt: number }
+  errorAlerts: boolean
   lastEvaluation: number
   lastSwitch: number
   reason: string
@@ -85,7 +87,7 @@ export function groupFrom(view?: View): Group {
     notify: false, channels: [], events: ['down', 'slow', 'recover', 'error'],
   }
   if (!view) return initial
-  const { health: _health, current: _current, simulated: _simulated, lastError: _error,
+  const { cloud: _cloud, errorAlerts: _alerts, health: _health, current: _current, simulated: _simulated, lastError: _error,
     lastEvaluation: _evaluation, lastSwitch: _switch, reason: _reason, ...group } = view
   return group
 }
